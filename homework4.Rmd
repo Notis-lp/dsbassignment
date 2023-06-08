@@ -1,0 +1,683 @@
+---
+title: 'Homework 4: Machine Learning'
+author: "Your name goes here"
+date: "`r Sys.Date()`"
+output:
+  word_document:
+    toc: yes
+  pdf_document:
+    toc: yes
+  html_document:
+    theme: flatly
+    highlight: zenburn
+    number_sections: yes
+    toc: yes
+    toc_float: yes
+    code_folding: show
+---
+
+```{r}
+#| label: load-libraries
+#| echo: false # This option disables the printing of code (only output is displayed).
+#| message: false
+#| warning: false
+options(scipen = 999) #disable scientific notation
+library(tidyverse)
+library(tidymodels)
+library(GGally)
+library(sf)
+library(leaflet)
+library(janitor)
+library(rpart.plot)
+library(here)
+library(scales)
+library(vip)
+```
+
+
+# The Bechdel Test
+
+
+```{r read_data}
+
+bechdel <- read_csv(here::here("data", "bechdel.csv")) %>% 
+  mutate(test = factor(test)) 
+glimpse(bechdel)
+
+```
+How many films fail/pass the test, both as a number and as a %?
+
+```{r}
+bechdel %>% 
+  group_by(test) %>% 
+  summarise('n'=n()) %>% 
+  mutate("percent"=n/sum(n))
+```
+622 movies pass the test 44.62%
+772 movies fail the test 55.38%
+
+## Movie scores
+```{r}
+ggplot(data = bechdel, aes(
+  x = metascore,
+  y = imdb_rating,
+  colour = test
+)) +
+  geom_point(alpha = .3, size = 3) +
+  scale_colour_manual(values = c("tomato", "olivedrab")) +
+  labs(
+    x = "Metacritic score",
+    y = "IMDB rating",
+    colour = "Bechdel test"
+  ) +
+ theme_light()
+```
+
+
+# Split the data
+```{r}
+# **Split the data**
+
+set.seed(123)
+
+data_split <- initial_split(bechdel, # updated data
+                           prop = 0.8, 
+                           strata = test)
+
+bechdel_train <- training(data_split) 
+bechdel_test <- testing(data_split)
+```
+
+Check the counts and % (proportions) of the `test` variable in each set.
+```{r}
+bechdel_train %>% 
+  group_by(test) %>% 
+  summarise('n'=n()) %>% 
+  mutate("percent"=n/sum(n))
+bechdel_test %>% 
+  group_by(test) %>% 
+  summarise('n'=n()) %>% 
+  mutate("percent"=n/sum(n))
+
+```
+The counts and proportions are as expected. The count is higher on the training data set but the proportions are the same (use of stata=test)
+
+## Feature exploration
+
+## Any outliers? 
+
+```{r}
+
+bechdel %>% 
+  select(test, budget_2013, domgross_2013, intgross_2013, imdb_rating, metascore) %>% 
+
+    pivot_longer(cols = 2:6,
+               names_to = "feature",
+               values_to = "value") %>% 
+  ggplot()+
+  aes(x=test, y = value, fill = test)+
+  coord_flip()+
+  geom_boxplot()+
+  facet_wrap(~feature, scales = "free")+
+  theme_bw()+
+  theme(legend.position = "none")+
+  labs(x=NULL,y = NULL)
+
+```
+From the above plot we can identify that there are some outliers. More specifically when it comes to budget there is one movie that failed the test with a huge budget. Also intgross has some extreme values for both categories. Regarding metascore there is an outlier with a vary small value for a movie that passed the test.
+Based on the plot we can see that the budget for movies that pass the test is usually smaller, as well as the imdb rating.
+## Scatterplot - Correlation Matrix
+
+Write a paragraph discussing the output of the following 
+```{r, warning=FALSE, message=FALSE}
+bechdel %>% 
+  select(test, budget_2013, domgross_2013, intgross_2013, imdb_rating, metascore)%>% 
+  ggpairs(aes(colour=test), alpha=0.2)+
+  theme_bw()
+```
+
+the distributions regarding the budget, domgross and intgross are heavily skewed to the right. we can again see what we identified before, that te budget for movies that passed the test is usually smaller and they have a lower imdb rating. In addition we identify a very high correlation between intgross and domgross, as expected. There is also a strong correlation between imdb rating and metascore but no correlation between budget and imdb rating or metascore.
+## Categorical variables
+
+```{r}
+bechdel %>% 
+  group_by(genre, test) %>%
+  summarise(n = n()) %>% 
+  mutate(prop = n/sum(n))
+  
+ 
+bechdel %>% 
+  group_by(rated, test) %>%
+  summarise(n = n()) %>% 
+  mutate(prop = n/sum(n))
+```
+From the above tables we understand that most action, crime, mystery and animation movies fail the test but most horror movies pass the test. All documentaries and sci-fi movies fail the test but we have very few movies in these categories. On the other hand all musicals and thrillers pass the test, but with the same caviat, very small number of movies. All of the others genres are pretty evenly split.
+
+Regarding the rating, all of them tend to fail the test but there are two notable ratings. NC-17 movies tend to fail the test the most (but we have a small number of movies in this rating) and PG-13 rated movies tend to have an even split.
+# Train first models. `test ~ metascore + imdb_rating`
+
+```{r}
+lr_mod <- logistic_reg() %>% 
+  set_engine(engine = "glm") %>% 
+  set_mode("classification")
+
+lr_mod
+
+
+tree_mod <- decision_tree() %>% 
+  set_engine(engine = "C5.0") %>% 
+  set_mode("classification")
+
+tree_mod 
+```
+
+```{r}
+
+
+lr_fit <- lr_mod %>% # parsnip model
+  fit(test ~ metascore + imdb_rating, # a formula
+    data = bechdel_train # dataframe
+  )
+
+tree_fit <- tree_mod %>% # parsnip model
+  fit(test ~ metascore + imdb_rating, # a formula
+    data = bechdel_train # dataframe
+  )
+```
+
+## Logistic regression
+
+```{r}
+lr_fit %>%
+  broom::tidy()
+
+lr_preds <- lr_fit %>%
+  augment(new_data = bechdel_train) %>%
+  mutate(.pred_match = if_else(test == .pred_class, 1, 0))
+
+```
+
+### Confusion matrix
+
+```{r}
+lr_preds %>% 
+  conf_mat(truth = test, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap")
+
+
+```
+
+
+## Decision Tree
+```{r}
+tree_preds <- tree_fit %>%
+  augment(new_data = bechdel) %>%
+  mutate(.pred_match = if_else(test == .pred_class, 1, 0)) 
+
+
+```
+
+```{r}
+tree_preds %>% 
+  conf_mat(truth = test, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap")
+```
+
+## Draw the decision tree
+
+```{r}
+draw_tree <- 
+    rpart::rpart(
+        test ~ metascore + imdb_rating,
+        data = bechdel_train, # uses data that contains both birth weight and `low`
+        control = rpart::rpart.control(maxdepth = 5, cp = 0, minsplit = 10)
+    ) %>% 
+    partykit::as.party()
+plot(draw_tree)
+
+```
+
+# Cross Validation
+
+Run the code below. What does it return?
+
+```{r}
+set.seed(123)
+bechdel_folds <- vfold_cv(data = bechdel_train, 
+                          v = 10, 
+                          strata = test)
+bechdel_folds
+```
+
+## `fit_resamples()`
+
+Trains and tests a resampled model.
+
+```{r}
+lr_fit <- lr_mod %>%
+  fit_resamples(
+    test ~ metascore + imdb_rating,
+    resamples = bechdel_folds
+  )
+
+
+tree_fit <- tree_mod %>%
+  fit_resamples(
+    test ~ metascore + imdb_rating,
+    resamples = bechdel_folds
+  )
+```
+
+
+## `collect_metrics()`
+
+Unnest the metrics column from a tidymodels `fit_resamples()`
+```{r}
+
+collect_metrics(lr_fit)
+collect_metrics(tree_fit)
+
+
+```
+
+
+```{r}
+tree_preds <- tree_mod %>% 
+  fit_resamples(
+    test ~ metascore + imdb_rating, 
+    resamples = bechdel_folds,
+    control = control_resamples(save_pred = TRUE) #<<
+  )
+
+# What does the data for ROC look like?
+tree_preds %>% 
+  collect_predictions() %>% 
+  roc_curve(truth = test, .pred_Fail)  
+
+# Draw the ROC
+tree_preds %>% 
+  collect_predictions() %>% 
+  roc_curve(truth = test, .pred_Fail) %>% 
+  autoplot()
+
+```
+
+
+# Build a better training set with `recipes`
+
+
+## Collapse Some Categorical Levels
+
+Do we have any `genre` with few observations?  Assign genres that have less than 3% to a new category 'Other'
+
+
+```{r}
+#| echo = FALSE
+bechdel %>% 
+  count(genre) %>% 
+  mutate(genre = fct_reorder(genre, n)) %>% 
+  ggplot(aes(x = genre, 
+             y = n)) +
+  geom_col(alpha = .8) +
+  coord_flip() +
+  labs(x = NULL) +
+  geom_hline(yintercept = (nrow(bechdel_train)*.03), lty = 3)+
+  theme_light()
+```
+Yes, Mystery, Fantasy, Sci-Fi, Thriller, Documentary and Musical.
+
+```{r}
+movie_rec <-
+  recipe(test ~ .,
+         data = bechdel_train) %>%
+  
+  # Genres with less than 3% will be in a category 'Other'
+    step_other(genre, threshold = .03) 
+```
+  
+
+## Before recipe
+
+```{r}
+#| echo = FALSE
+bechdel_train %>% 
+  count(genre, sort = TRUE)
+```
+
+
+## After recipe
+
+```{r}
+movie_rec %>% 
+  prep() %>% 
+  bake(new_data = bechdel_train) %>% 
+  count(genre, sort = TRUE)
+```
+
+## `step_dummy()`
+
+Converts nominal data into numeric dummy variables
+
+```{r}
+#| results = "hide"
+movie_rec <- recipe(test ~ ., data = bechdel) %>%
+  step_other(genre, threshold = .03) %>% 
+  step_dummy(all_nominal_predictors()) 
+
+movie_rec 
+```
+
+## Let's think about the modelling 
+
+What if there were no films with `rated` NC-17 in the training data?
+
+-  Will the model have a coefficient for `rated` NC-17? 
+No
+-  What will happen if the test data includes a film with `rated` NC-17? 
+We use step_novel in the recipe
+
+
+```{r}
+movie_rec <- recipe(test ~ ., data = bechdel) %>%
+  step_other(genre, threshold = .03) %>% 
+  step_novel(all_nominal(), -all_outcomes()) %>% # Use *before* `step_dummy()` so new level is dummified
+  step_dummy(all_nominal(), -all_outcomes()) %>% #Adds a catch-all level to a factor for any new values not encountered in model training
+  step_zv(all_numeric(), -all_outcomes())  %>% #Intelligently handles zero variance variables
+  step_normalize(all_numeric()) #Centers then scales numeric variable
+
+movie_rec
+```
+
+
+# Define different models to fit
+
+```{r}
+## Model Building
+
+# 1. Pick a `model type`
+# 2. set the `engine`
+# 3. Set the `mode`: regression or classification
+
+# Logistic regression
+log_spec <-  logistic_reg() %>%  # model type
+  set_engine(engine = "glm") %>%  # model engine
+  set_mode("classification") # model mode
+
+# Show your model specification
+log_spec
+
+# Decision Tree
+tree_spec <- decision_tree() %>%
+  set_engine(engine = "C5.0") %>%
+  set_mode("classification")
+
+tree_spec
+
+# Random Forest
+library(ranger)
+
+rf_spec <- 
+  rand_forest() %>% 
+  set_engine("ranger", importance = "impurity") %>% 
+  set_mode("classification")
+
+
+# Boosted tree (XGBoost)
+library(xgboost)
+
+xgb_spec <- 
+  boost_tree() %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification") 
+
+# K-nearest neighbour (k-NN)
+knn_spec <- 
+  nearest_neighbor(neighbors = 4) %>% # we can adjust the number of neighbors 
+  set_engine("kknn") %>% 
+  set_mode("classification") 
+```
+
+
+# Bundle recipe and model with `workflows`
+
+
+```{r}
+log_wflow <- # new workflow object
+ workflow() %>% # use workflow function
+ add_recipe(movie_rec) %>%   # use the new recipe
+ add_model(log_spec)   # add your model spec
+
+# show object
+log_wflow
+
+
+## A few more workflows
+
+tree_wflow <-
+ workflow() %>%
+ add_recipe(movie_rec) %>% 
+ add_model(tree_spec) 
+
+rf_wflow <-
+ workflow() %>%
+ add_recipe(movie_rec) %>% 
+ add_model(rf_spec) 
+
+xgb_wflow <-
+ workflow() %>%
+ add_recipe(movie_rec) %>% 
+ add_model(xgb_spec)
+
+knn_wflow <-
+ workflow() %>%
+ add_recipe(movie_rec) %>% 
+ add_model(knn_spec)
+
+```
+
+HEADS UP
+
+1. How many models have you specified? 
+5
+2. What's the difference between a model specification and a workflow? 
+A model specification focuses specifically on defining the structure and parameters of a single model, while a workflow refers to the broader sequence of steps involved in a data analysis project, encompassing data preprocessing, model building, evaluation, and other related tasks.
+3. Do you need to add a formula (e.g., `test ~ .`)  if you have a recipe? 
+No everything (except the folds) are already specified.
+
+
+# Model Comparison
+
+You now have all your models. Adapt the code from slides `code-from-slides-CA-housing.R`, line 400 onwards to assess which model gives you the best classification. 
+
+
+```{r}
+log_res <- log_wflow %>% 
+  fit_resamples(
+    resamples = bechdel_folds, 
+    metrics = metric_set(
+      recall, precision, f_meas, accuracy,
+      kap, roc_auc, sens, spec),
+    control = control_resamples(save_pred = TRUE)) 
+
+# Show average performance over all folds (note that we use log_res):
+log_res %>%  collect_metrics(summarize = TRUE)
+
+# Show performance for every single fold:
+log_res %>%  collect_metrics(summarize = FALSE)
+
+## Decision Tree results
+
+tree_res <-
+  tree_wflow %>% 
+  fit_resamples(
+    resamples = bechdel_folds, 
+    metrics = metric_set(
+      recall, precision, f_meas, 
+      accuracy, kap,
+      roc_auc, sens, spec),
+    control = control_resamples(save_pred = TRUE)
+    ) 
+
+## Random Forest
+
+rf_res <-
+  rf_wflow %>% 
+  fit_resamples(
+    resamples = bechdel_folds, 
+    metrics = metric_set(
+      recall, precision, f_meas, 
+      accuracy, kap,
+      roc_auc, sens, spec),
+    control = control_resamples(save_pred = TRUE)
+    ) 
+
+## Boosted tree - XGBoost
+
+xgb_res <- 
+  xgb_wflow %>% 
+  fit_resamples(
+    resamples = bechdel_folds, 
+    metrics = metric_set(
+      recall, precision, f_meas, 
+      accuracy, kap,
+      roc_auc, sens, spec),
+    control = control_resamples(save_pred = TRUE)
+    ) 
+
+## K-nearest neighbour
+
+knn_res <- 
+  knn_wflow %>% 
+  fit_resamples(
+    resamples = bechdel_folds, 
+    metrics = metric_set(
+      recall, precision, f_meas, 
+      accuracy, kap,
+      roc_auc, sens, spec),
+    control = control_resamples(save_pred = TRUE)
+    ) 
+
+## Model Comparison
+
+log_metrics <- 
+  log_res %>% 
+  collect_metrics(summarise = TRUE) %>%
+  # add the name of the model to every row
+  mutate(model = "Logistic Regression") 
+
+tree_metrics <- 
+  tree_res %>% 
+  collect_metrics(summarise = TRUE) %>%
+  mutate(model = "Decision Tree")
+
+rf_metrics <- 
+  rf_res %>% 
+  collect_metrics(summarise = TRUE) %>%
+  mutate(model = "Random Forest")
+
+xgb_metrics <- 
+  xgb_res %>% 
+  collect_metrics(summarise = TRUE) %>%
+  mutate(model = "XGBoost")
+
+knn_metrics <- 
+  knn_res %>% 
+  collect_metrics(summarise = TRUE) %>%
+  mutate(model = "Knn")
+
+# create dataframe with all models
+model_compare <- bind_rows(log_metrics,
+                           tree_metrics,
+                           rf_metrics,
+                           xgb_metrics,
+                           knn_metrics) 
+
+#Pivot wider to create barplot
+  model_comp <- model_compare %>% 
+  select(model, .metric, mean, std_err) %>% 
+  pivot_wider(names_from = .metric, values_from = c(mean, std_err)) 
+
+# show mean are under the curve (ROC-AUC) for every model
+model_comp %>% 
+  arrange(mean_roc_auc) %>% 
+  mutate(model = fct_reorder(model, mean_roc_auc)) %>% # order results
+  ggplot(aes(model, mean_roc_auc, fill=model)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_brewer(palette = "Blues") +
+   geom_text(
+     size = 3,
+     aes(label = round(mean_roc_auc, 2), 
+         y = mean_roc_auc + 0.08),
+     vjust = 1
+  )+
+  theme_light()+
+  theme(legend.position = "none")+
+  labs(y = NULL)
+```
+
+
+
+```{r}
+# - `last_fit()`  fits a model to the whole training data and evaluates it on the test set. 
+# - provide the workflow object of the best model as well as the data split object (not the training data). 
+last_fit_xgb <- last_fit(xgb_wflow, 
+                        split = data_split,
+                        metrics = metric_set(
+                          accuracy, f_meas, kap, precision,
+                          recall, roc_auc, sens, spec))
+
+last_fit_xgb %>% collect_metrics(summarize = TRUE)
+
+#Compare to training
+xgb_res %>% collect_metrics(summarize = TRUE)
+
+
+## Variable importance using `{vip}` package
+
+library(vip)
+
+last_fit_xgb %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit() %>% 
+  vip(num_features = 10) +
+  theme_light()
+
+
+## Final Confusion Matrix
+
+last_fit_xgb %>%
+  collect_predictions() %>% 
+  conf_mat(test, .pred_class) %>% 
+  autoplot(type = "heatmap")
+
+
+## Final ROC curve
+last_fit_xgb %>% 
+  collect_predictions() %>% 
+  roc_curve(test, .pred_Fail) %>% 
+  autoplot()
+```
+
+
+# Deliverables
+
+There is a lot of explanatory text, comments, etc. You do not need these, so delete them and produce a stand-alone document that you could share with someone. Knit the edited and completed R Markdown (Rmd) file as a Word or HTML document (use the "Knit" button at the top of the script editor window) and upload it to Canvas. You must be commiting and pushing your changes to your own Github repo as you go along.
+
+# Details
+
+-   Who did you collaborate with: nobody
+-   Approximately how much time did you spend on this problem set: 3
+-   What, if anything, gave you the most trouble: 
+
+**Please seek out help when you need it,** and remember the [15-minute rule](https://dsb2023.netlify.app/syllabus/#the-15-minute-rule){target="_blank"}. You know enough R (and have enough examples of code from class and your readings) to be able to do this. If you get stuck, ask for help from others, post a question on Slack-- and remember that I am here to help too!
+
+> As a true test to yourself, do you understand the code you submitted and are you able to explain it to someone else?
+
+# Rubric
+
+13/13: Problem set is 100% completed. Every question was attempted and answered, and most answers are correct. Code is well-documented (both self-documented and with additional comments as necessary). Used tidyverse, instead of base R. Graphs and tables are properly labelled. Analysis is clear and easy to follow, either because graphs are labeled clearly or you've written additional text to describe how you interpret the output. Multiple Github commits. Work is exceptional. I will not assign these often.
+
+8/13: Problem set is 60--80% complete and most answers are correct. This is the expected level of performance. Solid effort. Hits all the elements. No clear mistakes. Easy to follow (both the code and the output). A few Github commits.
+
+5/13: Problem set is less than 60% complete and/or most answers are incorrect. This indicates that you need to improve next time. I will hopefully not assign these often. Displays minimal effort. Doesn't complete all components. Code is poorly written and not documented. Uses the same type of plot for each graph, or doesn't use plots appropriate for the variables being analyzed. No Github commits.

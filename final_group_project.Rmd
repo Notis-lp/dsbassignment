@@ -28,7 +28,8 @@ library(kknn)
 library(here)
 library(tictoc)
 library(vip)
-library(ranger)
+library(ranger)# Random Forest
+library(xgboost)# Boosted tree
 ```
 
 # The problem: predicting credit card fraud
@@ -241,10 +242,13 @@ What steps are you going to add to your recipe? Do you need to do any log transf
 ```{r, define_recipe}
 
 fraud_rec <- recipe(is_fraud ~ ., data = card_fraud_train) %>%
-
-
-
-
+  step_log(distance_miles, amt) %>%   #Log normalize the miles to improve the indicator
+  step_other(CATEGORY, threshold = .05) %>% #FROM EDA
+  step_novel(all_nominal(), -all_outcomes()) %>% # Use *before* `step_dummy()` so new level is dummified
+  step_dummy(all_nominal(), -all_outcomes()) %>% #Adds a catch-all level to a factor for any new values not encountered in model training
+  step_zv(all_numeric(), -all_outcomes())  %>% #Intelligently handles zero variance variables
+  step_normalize(all_numeric()) #Centers then scales numeric variable
+#log amount??
 
 ```
 
@@ -257,7 +261,6 @@ prepped_data <-
   juice() # extract only the preprocessed dataframe 
 
 glimpse(prepped_data)
-
 ```
 
 
@@ -278,21 +281,74 @@ You should define the following classification models:
 # 2. set the `engine`
 # 3. Set the `mode`:  classification
 
+# 1.Logistic regression
+log_spec <-  logistic_reg() %>%  # model type
+  set_engine(engine = "glm") %>%  # model engine
+  set_mode("classification") # model mode
+
+# 2.Decision Tree
+tree_spec <- decision_tree() %>%
+  set_engine(engine = "C5.0") %>%
+  set_mode("classification")
+
+# 3.Random Forest
+rf_spec <- 
+  rand_forest() %>% 
+  set_engine("ranger", importance = "impurity") %>% 
+  set_mode("classification")
+
+# 4.Boosted tree (XGBoost)
+xgb_spec <- 
+  boost_tree() %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification") 
+
+# 5.K-nearest neighbour (k-NN)
+knn_spec <- 
+  nearest_neighbor(neighbors = 4) %>% # we can adjust the number of neighbors 
+  set_engine("kknn") %>% 
+  set_mode("classification") 
 
 ```
 
 ## Bundle recipe and model with `workflows`
 
 ```{r, define_workflows}
-
-
 ## Bundle recipe and model with `workflows`
 
-
+# Logistic regression workflow
 log_wflow <- # new workflow object
  workflow() %>% # use workflow function
  add_recipe(fraud_rec) %>%   # use the new recipe
  add_model(log_spec)   # add your model spec
+
+
+# Decision Tree workflow
+tree_wflow <-
+ workflow() %>%
+ add_recipe(fraud_rec) %>% 
+ add_model(tree_spec) 
+
+
+# Random Forest workflow
+rf_wflow <-
+ workflow() %>%
+ add_recipe(fraud_rec) %>% 
+ add_model(rf_spec) 
+
+
+# Boosted tree (XGBoost) workflow
+xgb_wflow <-
+ workflow() %>%
+ add_recipe(fraud_rec) %>% 
+ add_model(xgb_spec)
+
+
+# K-nearest neighbour workflow
+knn_wflow <-
+ workflow() %>%
+ add_recipe(fraud_rec) %>% 
+ add_model(knn_spec)
 
 ```
 
@@ -314,6 +370,59 @@ time <- toc()
 log_time <- time[[4]]
 
 
+
+## Decision Tree results
+tic()
+tree_res <-
+  tree_wflow %>% 
+  fit_resamples(
+    resamples = bechdel_folds, 
+    metrics = metric_set(
+      recall, precision, f_meas, 
+      accuracy, kap,
+      roc_auc, sens, spec),
+    control = control_resamples(save_pred = TRUE)
+    ) 
+
+## Random Forest
+
+rf_res <-
+  rf_wflow %>% 
+  fit_resamples(
+    resamples = bechdel_folds, 
+    metrics = metric_set(
+      recall, precision, f_meas, 
+      accuracy, kap,
+      roc_auc, sens, spec),
+    control = control_resamples(save_pred = TRUE)
+    ) 
+
+## Boosted tree - XGBoost
+
+xgb_res <- 
+  xgb_wflow %>% 
+  fit_resamples(
+    resamples = bechdel_folds, 
+    metrics = metric_set(
+      recall, precision, f_meas, 
+      accuracy, kap,
+      roc_auc, sens, spec),
+    control = control_resamples(save_pred = TRUE)
+    ) 
+
+## K-nearest neighbour
+
+knn_res <- 
+  knn_wflow %>% 
+  fit_resamples(
+    resamples = bechdel_folds, 
+    metrics = metric_set(
+      recall, precision, f_meas, 
+      accuracy, kap,
+      roc_auc, sens, spec),
+    control = control_resamples(save_pred = TRUE)
+    ) 
+
 ```
 
 ## Compare models
@@ -328,7 +437,25 @@ log_metrics <-
   mutate(model = "Logistic Regression",
          time = log_time)
 
-# add mode models here
+tree_metrics <- 
+  tree_res %>% 
+  collect_metrics(summarise = TRUE) %>%
+  mutate(model = "Decision Tree")
+
+rf_metrics <- 
+  rf_res %>% 
+  collect_metrics(summarise = TRUE) %>%
+  mutate(model = "Random Forest")
+
+xgb_metrics <- 
+  xgb_res %>% 
+  collect_metrics(summarise = TRUE) %>%
+  mutate(model = "XGBoost")
+
+knn_metrics <- 
+  knn_res %>% 
+  collect_metrics(summarise = TRUE) %>%
+  mutate(model = "Knn")
 
 # create dataframe with all models
 model_compare <- bind_rows(log_metrics,
@@ -342,6 +469,28 @@ model_compare <- bind_rows(log_metrics,
            as.double()
          )
 
+#Pivot wider to create barplot
+  model_comp <- model_compare %>% 
+  select(model, .metric, mean, std_err) %>% 
+  pivot_wider(names_from = .metric, values_from = c(mean, std_err)) 
+
+# show mean are under the curve (ROC-AUC) for every model
+model_comp %>% 
+  arrange(mean_roc_auc) %>% 
+  mutate(model = fct_reorder(model, mean_roc_auc)) %>% # order results
+  ggplot(aes(model, mean_roc_auc, fill=model)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_brewer(palette = "Blues") +
+   geom_text(
+     size = 3,
+     aes(label = round(mean_roc_auc, 2), 
+         y = mean_roc_auc + 0.08),
+     vjust = 1
+  )+
+  theme_light()+
+  theme(legend.position = "none")+
+  labs(y = NULL)
 
 ```
 
@@ -356,7 +505,17 @@ This is a highly imbalanced data set, as roughly 99.5% of all transactions are o
 
 # - `last_fit()`  fits a model to the whole training data and evaluates it on the test set. 
 # - provide the workflow object of the best model as well as the data split object (not the training data). 
- 
+ last_fit_xgb <- last_fit(xgb_wflow,  #changeegeeeeeeeeeeeeeeeeeeeeee
+                        split = data_split,
+                        metrics = metric_set(
+                          accuracy, f_meas, kap, precision,
+                          recall, roc_auc, sens, spec))
+
+last_fit_xgb %>% collect_metrics(summarize = TRUE)
+
+#Compare to training
+xgb_res %>% collect_metrics(summarize = TRUE)
+
 
 ```
 
@@ -366,7 +525,12 @@ This is a highly imbalanced data set, as roughly 99.5% of all transactions are o
 
 
 ```{r}
-
+#variable importance
+last_fit_xgb %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit() %>% 
+  vip(num_features = 10) +
+  theme_light()
 ```
 
 ## Plot Final Confusion matrix and ROC curve
@@ -374,7 +538,6 @@ This is a highly imbalanced data set, as roughly 99.5% of all transactions are o
 
 ```{r}
 ## Final Confusion Matrix
-
 last_fit_xgb %>%
   collect_predictions() %>% 
   conf_mat(is_fraud, .pred_class) %>% 
@@ -397,10 +560,11 @@ last_fit_xgb %>%
 ```{r}
 #| label: savings-for-cc-company
 
+# Best model workflow workflow
+
 best_model_preds <- 
-  best_model_wflow %>% 
+  xgb_wflow %>% #best model workflow
   fit(data = card_fraud_train) %>%  
-  
   ## Use `augment()` to get predictions for entire data set
   augment(new_data = card_fraud)
 
@@ -412,7 +576,9 @@ cost <- best_model_preds %>%
 
 cost <- cost %>%
   mutate(
-  
+    
+    
+                                fraud / amount / distance / age / hour / weekday / category / .... !jobs
 
   # naive false-- we think every single transaction is ok and not fraud
 
