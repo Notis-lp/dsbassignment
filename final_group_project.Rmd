@@ -70,7 +70,7 @@ glimpse(card_fraud)
 
 The data dictionary is as follows
 
-| column(variable)      | description                                 |
+| column(variable)      | descriptioN                                  |
 |-----------------------|---------------------------------------------|
 | trans_date_trans_time | Transaction DateTime                        |
 | trans_year            | Transaction year                            |
