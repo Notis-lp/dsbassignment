@@ -71,7 +71,7 @@ glimpse(card_fraud)
 
 The data dictionary is as follows
 
-| column(variable)      | descriptioN                                  |
+| column(variable)      | description                                 |
 |-----------------------|---------------------------------------------|
 | trans_date_trans_time | Transaction DateTime                        |
 | trans_year            | Transaction year                            |
@@ -131,7 +131,6 @@ Group all variables by type and examine each variable class by class. The datase
 5.  Numerical
 
 Strings are usually not a useful format for classification problems. The strings should be converted to factors, dropped, or otherwise transformed.
-
 
 ***Strings to Factors*** 
 
@@ -203,6 +202,7 @@ Thus, we will work with a smaller sample of 10% of the values the original datas
 # select a smaller subset
 my_card_fraud <- card_fraud %>% 
   # select a smaller subset, 10% of the entire dataframe 
+  select(category, amt, city_pop, is_fraud, hour, age, distance_km,wday) %>% 
   slice_sample(prop = 0.10) 
 ```
 
@@ -234,23 +234,6 @@ cv_folds <- vfold_cv(data = card_fraud_train,
                           strata = is_fraud)
 cv_folds 
 ```
-```{r}
-
-
-state_prop <- card_fraud %>% 
-  group_by(state) %>% 
-  summarise(total=n()) %>% 
-  mutate(prop=(total/nrow(card_fraud))*100)
-
-card_state <-
-  recipe(state ~ .,
-         data = card_fraud) %>%
-  
-  # Genres with less than 5% will be in a catewgory 'Other'
-    step_other(state, threshold = .01) 
-
-
-```
 
 
 ## Define a tidymodels `recipe`
@@ -260,14 +243,11 @@ What steps are you going to add to your recipe? Do you need to do any log transf
 ```{r, define_recipe}
 
 fraud_rec <- recipe(is_fraud ~ ., data = card_fraud_train) %>%
-  step_log(distance_miles, amt) %>%   #Log normalize the miles to improve the indicator
-  step_other(CATEGORY, threshold = .05) %>% #FROM EDA
+  step_log(amt) %>%   #Log normalize the amount to improve the indicator
   step_novel(all_nominal(), -all_outcomes()) %>% # Use *before* `step_dummy()` so new level is dummified
   step_dummy(all_nominal(), -all_outcomes()) %>% #Adds a catch-all level to a factor for any new values not encountered in model training
   step_zv(all_numeric(), -all_outcomes())  %>% #Intelligently handles zero variance variables
   step_normalize(all_numeric()) #Centers then scales numeric variable
-#log amount??
-
 ```
 
 Once you have your recipe, you can check the pre-processed dataframe 
@@ -394,52 +374,60 @@ tic()
 tree_res <-
   tree_wflow %>% 
   fit_resamples(
-    resamples = bechdel_folds, 
+    resamples = cv_folds, 
     metrics = metric_set(
       recall, precision, f_meas, 
       accuracy, kap,
       roc_auc, sens, spec),
     control = control_resamples(save_pred = TRUE)
     ) 
+time <- toc()
+tree_time <- time[[4]]
 
 ## Random Forest
 
 rf_res <-
   rf_wflow %>% 
   fit_resamples(
-    resamples = bechdel_folds, 
+    resamples = cv_folds, 
     metrics = metric_set(
       recall, precision, f_meas, 
       accuracy, kap,
       roc_auc, sens, spec),
     control = control_resamples(save_pred = TRUE)
     ) 
+time <- toc()
+forest_time <- time[[4]]
 
 ## Boosted tree - XGBoost
 
 xgb_res <- 
   xgb_wflow %>% 
   fit_resamples(
-    resamples = bechdel_folds, 
+    resamples = cv_folds, 
     metrics = metric_set(
       recall, precision, f_meas, 
       accuracy, kap,
       roc_auc, sens, spec),
     control = control_resamples(save_pred = TRUE)
     ) 
+time <- toc()
+xgb_time <- time[[4]]
 
 ## K-nearest neighbour
 
 knn_res <- 
   knn_wflow %>% 
   fit_resamples(
-    resamples = bechdel_folds, 
+    resamples = cv_folds, 
     metrics = metric_set(
       recall, precision, f_meas, 
       accuracy, kap,
       roc_auc, sens, spec),
     control = control_resamples(save_pred = TRUE)
     ) 
+time <- toc()
+k_time <- time[[4]]
 
 ```
 
@@ -594,9 +582,7 @@ cost <- best_model_preds %>%
 
 cost <- cost %>%
   mutate(
-    
-    
-                                fraud / amount / distance / age / hour / weekday / category / .... !jobs
+  
 
   # naive false-- we think every single transaction is ok and not fraud
 
