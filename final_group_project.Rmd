@@ -131,6 +131,7 @@ Group all variables by type and examine each variable class by class. The datase
 
 Strings are usually not a useful format for classification problems. The strings should be converted to factors, dropped, or otherwise transformed.
 
+
 ***Strings to Factors*** 
 
 -   `category`, Category of Merchant
@@ -231,6 +232,23 @@ cv_folds <- vfold_cv(data = card_fraud_train,
                           v = 3, 
                           strata = is_fraud)
 cv_folds 
+```
+```{r}
+
+
+state_prop <- card_fraud %>% 
+  group_by(state) %>% 
+  summarise(total=n()) %>% 
+  mutate(prop=(total/nrow(card_fraud))*100)
+
+card_state <-
+  recipe(state ~ .,
+         data = card_fraud) %>%
+  
+  # Genres with less than 5% will be in a catewgory 'Other'
+    step_other(state, threshold = .01) 
+
+
 ```
 
 
